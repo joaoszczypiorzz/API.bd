@@ -1,26 +1,146 @@
 const express = require('express');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const db = require('./database'); 
+const autenticar = require('./middleware/auth');
+require('dotenv').config(); 
+const cors = require('cors');
 
 const app = express();
 app.use(express.json()); 
 
-// TESTES INICIAIS (Atualizados para usar categoria_id)
-const stmt = db.prepare('SELECT * FROM produtos WHERE id = ?');
-const produto = stmt.get(1);  
+// 3. Usar variáveis
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    console.error('🚨 ERRO FATAL: JWT_SECRET não está definido nas variáveis de ambiente!');
+    process.exit(1); // Desliga o servidor imediatamente para você perceber o erro
+}
 
-const stmt2 = db.prepare('SELECT * FROM produtos WHERE categoria_id = ? AND preco < ?');
-const produtosTeste = stmt2.all(1, 4000);  
+app.listen(PORT, () => {
+    console.log(`Servidor rodando na porta ${PORT}`);
+});
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+    ? process.env.ALLOWED_ORIGINS.split(',') 
+    : '*'; // Aceita requisições de qualquer lugar se a variável não existir
 
-// GET /api/produtos - Buscar todos (Filtros, Ordenação, Paginação e JOIN com Categorias)
+app.use(cors({
+  origin: allowedOrigins
+}));
+
+
+// ==========================================
+// ROTAS PÚBLICAS (Não precisam de Token)
+// ==========================================
+
+app.get('/', (req, res) => res.json({ mensagem: '🎉 API funcionando com sucesso!' }));
+
+// POST /auth/register
+app.post('/auth/register', async (req, res) => {
+    try {
+        const { nome, email, senha } = req.body;
+        
+        if (!nome || !email || !senha) {
+            return res.status(400).json({ erro: 'Campos obrigatórios' });
+        }
+        
+        if (senha.length < 6) {
+            return res.status(400).json({ erro: 'Senha mínimo 6 caracteres' });
+        }
+        
+        const usuarioExiste = db.prepare('SELECT id FROM usuarios WHERE email = ?').get(email);
+        
+        if (usuarioExiste) {
+            return res.status(400).json({ erro: 'Email já cadastrado' });
+        }
+        
+        const salt = await bcrypt.genSalt(10);
+        const senhaHash = await bcrypt.hash(senha, salt);
+        
+        const result = db.prepare(`
+            INSERT INTO usuarios (nome, email, senha)
+            VALUES (?, ?, ?)
+        `).run(nome, email, senhaHash);
+        
+        const userId = result.lastInsertRowid;
+        
+        const token = jwt.sign(
+            { userId, email, role: 'user' },
+            JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+        
+        res.status(201).json({
+            mensagem: 'Usuário criado com sucesso',
+            token,
+            usuario: { id: userId, nome, email }
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ erro: 'Erro ao criar usuário' });
+    }
+});
+
+// POST /auth/login
+app.post('/auth/login', async (req, res) => {
+    try {
+        const { email, senha } = req.body;
+        
+        if (!email || !senha) {
+            return res.status(400).json({ erro: 'Email e senha obrigatórios' });
+        }
+        
+        const usuario = db.prepare('SELECT * FROM usuarios WHERE email = ?').get(email);
+        
+        if (!usuario) {
+            return res.status(401).json({ erro: 'Email ou senha incorretos' });
+        }
+        
+        const senhaCorreta = await bcrypt.compare(senha, usuario.senha);
+        
+        if (!senhaCorreta) {
+            return res.status(401).json({ erro: 'Email ou senha incorretos' });
+        }
+        
+        const token = jwt.sign(
+            { userId: usuario.id, email: usuario.email, role: usuario.role },
+            JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+        
+        res.json({
+            mensagem: 'Login realizado com sucesso',
+            token,
+            usuario: {
+                id: usuario.id,
+                nome: usuario.nome,
+                email: usuario.email,
+                role: usuario.role
+            }
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ erro: 'Erro no login' });
+    }
+});
+
+
+// ==========================================
+// PROTEÇÃO GLOBAL PARA ROTAS /api
+// ==========================================
+// A partir desta linha, TODAS as rotas que começam com /api vão exigir o Token JWT
+app.use('/api', autenticar);
+
+
+// ==========================================
+// ROTAS PRIVADAS (Exigem Token JWT)
+// ==========================================
+
+// GET /api/produtos
 app.get('/api/produtos', (req, res) => {
     try {
-        const { 
-            categoria_id, preco_max, preco_min, 
-            ordem, direcao,
-            pagina = 1, limite = 10
-        } = req.query;
+        const { categoria_id, preco_max, preco_min, ordem, direcao, pagina = 1, limite = 10 } = req.query;
         
-        // 1. Separar a base do SQL para poder usar tanto na busca quanto no COUNT
         const baseQuery = `
             FROM produtos p
             INNER JOIN categorias c ON p.categoria_id = c.id
@@ -28,9 +148,8 @@ app.get('/api/produtos', (req, res) => {
         `;
         
         let filtros = '';
-        const paramsFiltros = []; // Parâmetros apenas do WHERE
+        const paramsFiltros = []; 
         
-        // --- 2. Aplicar Filtros (usando p. para referenciar a tabela produtos) ---
         if (categoria_id) {
             filtros += ' AND p.categoria_id = ?';
             paramsFiltros.push(parseInt(categoria_id));
@@ -44,34 +163,27 @@ app.get('/api/produtos', (req, res) => {
             paramsFiltros.push(parseFloat(preco_min));
         }
         
-        // --- 3. Contar total de registros (para a paginação) ---
         const countSql = `SELECT COUNT(*) as total ` + baseQuery + filtros;
         const countStmt = db.prepare(countSql);
         const { total } = countStmt.get(...paramsFiltros);
         
-        // --- 4. Aplicar Ordenação ---
         let ordemSql = '';
         const camposValidos = ['nome', 'preco', 'categoria_id', 'created_at'];
         
         if (ordem && camposValidos.includes(ordem)) {
             const dir = (direcao && direcao.toLowerCase() === 'desc') ? 'DESC' : 'ASC';
-            // Usa p.ordem para garantir que vai ordenar usando a tabela de produtos
             ordemSql += ` ORDER BY p.${ordem} ${dir}`; 
         } else {
-            // Ordenação padrão se não mandarem nada
             ordemSql += ` ORDER BY p.nome ASC`;
         }
         
-        // --- 5. Aplicar Paginação ---
         const limiteNum = parseInt(limite);
         const paginaNum = parseInt(pagina);
         const offset = (paginaNum - 1) * limiteNum;
         
         let paginacaoSql = ' LIMIT ? OFFSET ?';
-        // Junta os parâmetros dos filtros com os da paginação
         const paramsFinais = [...paramsFiltros, limiteNum, offset]; 
         
-        // --- 6. Montar o SELECT final completo e executar ---
         const selectCampos = `
             SELECT 
                 p.id, p.nome, p.preco, p.estoque, p.created_at,
@@ -84,7 +196,6 @@ app.get('/api/produtos', (req, res) => {
         const execStmt = db.prepare(sqlFinal);
         const produtosRaw = execStmt.all(...paramsFinais);
         
-        // --- 7. Reformatar os dados para aninhar a categoria ---
         const produtosFormatados = produtosRaw.map(p => ({
             id: p.id,
             nome: p.nome,
@@ -98,7 +209,6 @@ app.get('/api/produtos', (req, res) => {
             created_at: p.created_at
         }));
         
-        // --- 8. Retornar resposta JSON ---
         res.json({
             dados: produtosFormatados,
             paginacao: {
@@ -114,12 +224,11 @@ app.get('/api/produtos', (req, res) => {
     }
 });
 
-// GET /api/produtos/:id - Buscar por ID
+// GET /api/produtos/:id
 app.get('/api/produtos/:id', (req, res) => {
     try {
         const id = parseInt(req.params.id);
-        const queryStmt = db.prepare('SELECT * FROM produtos WHERE id = ?');
-        const produtoEncontrado = queryStmt.get(id);
+        const produtoEncontrado = db.prepare('SELECT * FROM produtos WHERE id = ?').get(id);
         
         if (!produtoEncontrado) return res.status(404).json({ erro: 'Produto não encontrado' });
         res.json(produtoEncontrado);
@@ -129,23 +238,18 @@ app.get('/api/produtos/:id', (req, res) => {
     }
 });
 
-// POST /api/produtos - Criar produto
+// POST /api/produtos
 app.post('/api/produtos', (req, res) => {
     try {
         const { nome, preco, categoria_id, estoque = 0 } = req.body;
         
-        if (!nome || !preco || !categoria_id) {
-            return res.status(400).json({ erro: 'Campos obrigatórios faltando' });
-        }
-        if (typeof preco !== 'number' || preco <= 0) {
-            return res.status(400).json({ erro: 'Preço inválido' });
-        }
+        if (!nome || !preco || !categoria_id) return res.status(400).json({ erro: 'Campos obrigatórios faltando' });
+        if (typeof preco !== 'number' || preco <= 0) return res.status(400).json({ erro: 'Preço inválido' });
         
-        const insertStmt = db.prepare(`
+        const result = db.prepare(`
             INSERT INTO produtos (nome, preco, categoria_id, estoque)
             VALUES (?, ?, ?, ?)
-        `);
-        const result = insertStmt.run(nome, preco, categoria_id, estoque);
+        `).run(nome, preco, categoria_id, estoque);
         
         const produtoCriado = db.prepare('SELECT * FROM produtos WHERE id = ?').get(result.lastInsertRowid);
         res.status(201).json(produtoCriado);
@@ -155,7 +259,7 @@ app.post('/api/produtos', (req, res) => {
     }
 });
 
-// DELETE /api/produtos/:id - Deletar produto
+// DELETE /api/produtos/:id
 app.delete('/api/produtos/:id', (req, res) => {
     try {
         const id = parseInt(req.params.id);
@@ -171,7 +275,7 @@ app.delete('/api/produtos/:id', (req, res) => {
     }
 });
 
-// PUT /api/produtos/:id - Atualizar produto
+// PUT /api/produtos/:id
 app.put('/api/produtos/:id', (req, res) => {
     try {
         const id = parseInt(req.params.id);
@@ -184,12 +288,11 @@ app.put('/api/produtos/:id', (req, res) => {
         if (!nome || !preco || !categoria_id) return res.status(400).json({ erro: 'Campos obrigatórios faltando' });
         if (typeof preco !== 'number' || preco <= 0) return res.status(400).json({ erro: 'Preço inválido' });
         
-        const updateStmt = db.prepare(`
+        db.prepare(`
             UPDATE produtos 
             SET nome = ?, preco = ?, categoria_id = ?, estoque = ?
             WHERE id = ?
-        `);
-        updateStmt.run(nome, preco, categoria_id, estoque || 0, id);
+        `).run(nome, preco, categoria_id, estoque || 0, id);
         
         const produtoAtualizado = db.prepare('SELECT * FROM produtos WHERE id = ?').get(id);
         res.json(produtoAtualizado);
@@ -199,78 +302,42 @@ app.put('/api/produtos/:id', (req, res) => {
     }
 });
 
-// GET /api/categorias - Listar todas
+// GET /api/categorias
 app.get('/api/categorias', (req, res) => {
     const categorias = db.prepare('SELECT * FROM categorias').all();
     res.json(categorias);
 });
 
-// GET /api/categorias/:id - Buscar por ID (com produtos!)
+// GET /api/categorias/:id
 app.get('/api/categorias/:id', (req, res) => {
     const id = parseInt(req.params.id);
+    const categoria = db.prepare('SELECT * FROM categorias WHERE id = ?').get(id);
     
-    // Buscar categoria
-    const categoria = db.prepare(
-        'SELECT * FROM categorias WHERE id = ?'
-    ).get(id);
+    if (!categoria) return res.status(404).json({ erro: 'Categoria não encontrada' });
     
-    if (!categoria) {
-        return res.status(404).json({ erro: 'Categoria não encontrada' });
-    }
-    
-    // Buscar produtos desta categoria
-    const produtos = db.prepare(
-        'SELECT * FROM produtos WHERE categoria_id = ?'
-    ).all(id);
-    
-    // Retornar categoria + produtos
-    res.json({
-        ...categoria,
-        produtos: produtos
-    });
+    const produtos = db.prepare('SELECT * FROM produtos WHERE categoria_id = ?').all(id);
+    res.json({ ...categoria, produtos });
 });
 
-// POST /api/categorias - Criar categoria
+// POST /api/categorias
 app.post('/api/categorias', (req, res) => {
     const { nome, descricao } = req.body;
+    if (!nome) return res.status(400).json({ erro: 'Nome obrigatório' });
     
-    if (!nome) {
-        return res.status(400).json({ erro: 'Nome obrigatório' });
-    }
-    
-    const result = db.prepare(
-        'INSERT INTO categorias (nome, descricao) VALUES (?, ?)'
-    ).run(nome, descricao);
-    
-    const categoria = db.prepare(
-        'SELECT * FROM categorias WHERE id = ?'
-    ).get(result.lastInsertRowid);
-    
+    const result = db.prepare('INSERT INTO categorias (nome, descricao) VALUES (?, ?)').run(nome, descricao);
+    const categoria = db.prepare('SELECT * FROM categorias WHERE id = ?').get(result.lastInsertRowid);
     res.status(201).json(categoria);
 });
 
-// DELETE /api/categorias/:id - Com validação!
+// DELETE /api/categorias/:id
 app.delete('/api/categorias/:id', (req, res) => {
     const id = parseInt(req.params.id);
-    
-    // Verificar se tem produtos
-    const temProdutos = db.prepare(
-        'SELECT COUNT(*) as total FROM produtos WHERE categoria_id = ?'
-    ).get(id);
+    const temProdutos = db.prepare('SELECT COUNT(*) as total FROM produtos WHERE categoria_id = ?').get(id);
     
     if (temProdutos.total > 0) {
-        return res.status(400).json({ 
-            erro: `Não pode deletar. Categoria tem ${temProdutos.total} produtos`
-        });
+        return res.status(400).json({ erro: `Não pode deletar. Categoria tem ${temProdutos.total} produtos` });
     }
     
     db.prepare('DELETE FROM categorias WHERE id = ?').run(id);
     res.status(204).send();
-});
-
-app.get('/', (req, res) => res.json({ mensagem: '🎉 API funcionando com sucesso!' }));
-
-const PORT = 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Servidor rodando em http://localhost:${PORT}`);
 });

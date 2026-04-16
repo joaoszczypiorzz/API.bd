@@ -1,16 +1,15 @@
 const Database = require('better-sqlite3');
-const db = new Database('loja.db');
-
+require('dotenv').config(); // 1º - Carrega as variáveis de ambiente
+// 2º - Define o caminho (usa a variável do .env, se não existir, usa padrão)
+const dbPath = process.env.DATABASE_URL || './loja.db';
+// 3º - Conecta ao banco usando a variável
+const db = new Database(dbPath);
 // Habilitar Foreign Keys (IMPORTANTE no SQLite!)
 db.exec('PRAGMA foreign_keys = ON');
 
-// 🚀 GARANTIA DE LIMPEZA: Apaga as tabelas antigas se existirem
-db.exec('DROP TABLE IF EXISTS produtos');
-db.exec('DROP TABLE IF EXISTS categorias');
-
-// 1. Criar tabela categorias
+// 1. Criar tabela categorias (Apenas se ela não existir)
 const createCategorias = `
-    CREATE TABLE categorias (
+    CREATE TABLE IF NOT EXISTS categorias (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nome VARCHAR(50) NOT NULL UNIQUE,
         descricao TEXT,
@@ -19,9 +18,9 @@ const createCategorias = `
 `;
 db.exec(createCategorias);
 
-// 2. Criar tabela produtos (com a coluna nova: categoria_id)
+// 2. Criar tabela produtos (Apenas se ela não existir)
 const createProdutos = `
-    CREATE TABLE produtos (
+    CREATE TABLE IF NOT EXISTS produtos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nome VARCHAR(100) NOT NULL,
         preco DECIMAL(10,2) NOT NULL,
@@ -36,28 +35,52 @@ const createProdutos = `
 `;
 db.exec(createProdutos);
 
-console.log('✅ Banco limpo e tabelas criadas com relacionamento!');
+// Criando tabela para Usuários 
+const createUsuarios = `
+    CREATE TABLE IF NOT EXISTS usuarios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome VARCHAR(100) NOT NULL,
+        email VARCHAR(100) NOT NULL UNIQUE,
+        senha VARCHAR(255) NOT NULL,
+        role VARCHAR(20) DEFAULT 'user',
+        created_at DATETIME DEFAULT (datetime('now', 'localtime'))
+    )
+`;
+db.exec(createUsuarios);
+//Criar índice no email para buscas rápidas
+db.exec('CREATE INDEX IF NOT EXISTS idx_email ON usuarios(email)');
 
-// Inserir categorias
-const categorias = [
-    { nome: 'Informática', descricao: 'Produtos de tecnologia' },
-    { nome: 'Livros', descricao: 'Livros e publicações' },
-    { nome: 'Eletrônicos', descricao: 'Aparelhos eletrônicos' }
-];
+// 3. Verificar se já existem dados antes de inserir
+// Fazemos um SELECT na tabela de categorias. Se a contagem for 0, o banco está vazio.
+const checkData = db.prepare('SELECT COUNT(*) as count FROM categorias').get();
 
-const stmtCat = db.prepare('INSERT INTO categorias (nome, descricao) VALUES (?, ?)');
-categorias.forEach(cat => stmtCat.run(cat.nome, cat.descricao));
+if (checkData.count === 0) {
+    console.log('⏳ Banco vazio detectado. Inserindo dados iniciais...');
 
-// Inserir produtos
-const produtos = [
-    { nome: 'Notebook Dell', preco: 3500, estoque: 10, categoria_id: 1 },
-    { nome: 'Mouse Logitech', preco: 150, estoque: 50, categoria_id: 1 },
-    { nome: 'JavaScript: The Good Parts', preco: 89, estoque: 30, categoria_id: 2 }
-];
+    // Inserir categorias
+    const categorias = [
+        { nome: 'Informática', descricao: 'Produtos de tecnologia' },
+        { nome: 'Livros', descricao: 'Livros e publicações' },
+        { nome: 'Eletrônicos', descricao: 'Aparelhos eletrônicos' }
+    ];
 
-const stmtProd = db.prepare('INSERT INTO produtos (nome, preco, estoque, categoria_id) VALUES (?, ?, ?, ?)');
-produtos.forEach(p => stmtProd.run(p.nome, p.preco, p.estoque, p.categoria_id));
+    const stmtCat = db.prepare('INSERT INTO categorias (nome, descricao) VALUES (?, ?)');
+    categorias.forEach(cat => stmtCat.run(cat.nome, cat.descricao));
 
-console.log('✅ Dados iniciais inseridos com sucesso!');
+    // Inserir produtos
+    const produtos = [
+        { nome: 'Notebook Dell', preco: 3500, estoque: 10, categoria_id: 1 },
+        { nome: 'Mouse Logitech', preco: 150, estoque: 50, categoria_id: 1 },
+        { nome: 'JavaScript: The Good Parts', preco: 89, estoque: 30, categoria_id: 2 }
+    ];
+
+    const stmtProd = db.prepare('INSERT INTO produtos (nome, preco, estoque, categoria_id) VALUES (?, ?, ?, ?)');
+    produtos.forEach(p => stmtProd.run(p.nome, p.preco, p.estoque, p.categoria_id));
+
+    console.log('✅ Tabelas criadas e dados iniciais inseridos com sucesso!');
+} else {
+    // Se a contagem não for 0, ele cai aqui e apenas conecta sem mexer nos dados.
+    console.log('✅ Banco conectado. Dados já existentes, pulando inserção inicial.');
+}
 
 module.exports = db;
