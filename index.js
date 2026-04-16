@@ -18,20 +18,78 @@ const stmt2 = db.prepare(
 );
 const produtos = stmt2.all('Informática', 1000);  // Retorna array
 
-// GET /api/produtos - Listar todos
+// GET /api/produtos - Buscar todos com Filtros, Ordenação e Paginação
 app.get('/api/produtos', (req, res) => {
     try {
-        // Preparar query
-        const stmt = db.prepare('SELECT * FROM produtos');
+        // Pega todos os query parameters de uma vez, com valores padrão para paginação
+        const { 
+            categoria, preco_max, preco_min, 
+            ordem, direcao,
+            pagina = 1, 
+            limite = 10
+        } = req.query;
         
-        // Executar e pegar todos os resultados
-        const produtos = stmt.all();
+        let sql = 'SELECT * FROM produtos WHERE 1=1';
+        const params = [];
         
-        // Retornar array (pode ser vazio [])
-        res.json(produtos);
+        // --- 1. Aplicar Filtros ---
+        if (categoria) {
+            sql += ' AND categoria = ?';
+            params.push(categoria);
+        }
+        
+        if (preco_max) {
+            sql += ' AND preco <= ?';
+            params.push(parseFloat(preco_max));
+        }
+        
+        if (preco_min) {
+            sql += ' AND preco >= ?';
+            params.push(parseFloat(preco_min));
+        }
+        
+        // --- 2. Aplicar Ordenação ---
+        const camposValidos = ['nome', 'preco', 'categoria', 'created_at'];
+        
+        if (ordem && camposValidos.includes(ordem)) {
+            const dir = (direcao && direcao.toLowerCase() === 'desc') ? 'DESC' : 'ASC';
+            sql += ` ORDER BY ${ordem} ${dir}`;
+        }
+        
+        // --- 3. Contar total de registros (ANTES do LIMIT/OFFSET) ---
+        // Aqui trocamos o "SELECT *" para descobrir quantos itens existem no total com esses filtros
+        let countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total');
+        const countStmt = db.prepare(countSql);
+        const { total } = countStmt.get(...params);
+        
+        // --- 4. Aplicar Paginação ---
+        const limiteNum = parseInt(limite);
+        const paginaNum = parseInt(pagina);
+        const offset = (paginaNum - 1) * limiteNum;
+        
+        sql += ' LIMIT ? OFFSET ?';
+        params.push(limiteNum, offset);
+        
+        console.log("Query executada:", sql); // 👈 debug para ver no terminal
+        
+        // --- 5. Executar a busca final ---
+        const stmt = db.prepare(sql);
+        const produtos = stmt.all(...params);
+        
+        // --- 6. Retornar dados com os metadados ---
+        // Note que agora o JSON de resposta mudou sua estrutura!
+        res.json({
+            dados: produtos,
+            paginacao: {
+                pagina_atual: paginaNum,
+                itens_por_pagina: limiteNum,
+                total_itens: total,
+                total_paginas: Math.ceil(total / limiteNum)
+            }
+        });
     } catch (error) {
         console.error(error);
-        res.status(500).json({ erro: 'Erro ao buscar produtos' });
+        res.status(500).json({ erro: 'Erro na busca de produtos' });
     }
 });
 
@@ -103,6 +161,91 @@ app.post('/api/produtos', (req, res) => {
     } catch (error) {
         console.error(error);
         res.status(500).json({ erro: 'Erro ao criar produto' });
+    }
+});
+
+// DELETE /api/produtos/:id - Deletar produto
+app.delete('/api/produtos/:id', (req, res) => {
+    try {
+        // 1. Pegar ID da URL
+        const id = parseInt(req.params.id);
+        
+        // 2. Verificar se produto existe
+        const produtoExiste = db.prepare(
+            'SELECT * FROM produtos WHERE id = ?'
+        ).get(id);
+        
+        if (!produtoExiste) {
+            return res.status(404).json({ 
+                erro: 'Produto não encontrado' 
+            });
+        }
+        
+        // 3. Executar DELETE
+        const stmt = db.prepare('DELETE FROM produtos WHERE id = ?');
+        stmt.run(id);
+        
+        // 4. Retornar 204 No Content
+        return res.status(200).json({ mensagem: "Produto apagado com sucesso!"});
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ erro: 'Erro ao deletar' });
+    }
+});
+
+// PUT /api/produtos/:id - Atualizar produto
+app.put('/api/produtos/:id', (req, res) => {
+    try {
+        // 1. Pegar ID da URL
+        const id = parseInt(req.params.id);
+        
+        // 2. Verificar se produto existe
+        const produtoExiste = db.prepare(
+            'SELECT * FROM produtos WHERE id = ?'
+        ).get(id);
+        
+        if (!produtoExiste) {
+            return res.status(404).json({ 
+                erro: 'Produto não encontrado' 
+            });
+        }
+        
+        // 3. Pegar dados do body
+        const { nome, preco, categoria, estoque } = req.body;
+        
+        // 4. Validações (mesmas do POST!)
+        if (!nome || !preco || !categoria) {
+            return res.status(400).json({ 
+                erro: 'Campos obrigatórios faltando' 
+            });
+        }
+        
+        if (typeof preco !== 'number' || preco <= 0) {
+            return res.status(400).json({ 
+                erro: 'Preço inválido' 
+            });
+        }
+        
+        // 5. Executar UPDATE
+        const stmt = db.prepare(`
+            UPDATE produtos 
+            SET nome = ?, preco = ?, categoria = ?, estoque = ?
+            WHERE id = ?
+        `);
+        
+        stmt.run(nome, preco, categoria, estoque || 0, id);
+        
+        // 6. Buscar produto atualizado
+        const produtoAtualizado = db.prepare(
+            'SELECT * FROM produtos WHERE id = ?'
+        ).get(id);
+        
+        // 7. Retornar 200 OK
+        res.json(produtoAtualizado);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ erro: 'Erro ao atualizar' });
     }
 });
 
