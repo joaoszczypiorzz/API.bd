@@ -1,85 +1,106 @@
-// 1. Importar Express
 const express = require('express');
-const db = require('./database'); //importando require para o Banco de dados 
+const db = require('./database'); 
 
-// 2. Criar aplicação
 const app = express();
 app.use(express.json()); 
 
-// 1. Preparar query (com ? como placeholders)
+// TESTES INICIAIS (Atualizados para usar categoria_id)
 const stmt = db.prepare('SELECT * FROM produtos WHERE id = ?');
+const produto = stmt.get(1);  
 
-// 2. Executar com valores
-const produto = stmt.get(1);  // Retorna 1 linha
+const stmt2 = db.prepare('SELECT * FROM produtos WHERE categoria_id = ? AND preco < ?');
+const produtosTeste = stmt2.all(1, 4000);  
 
-// Múltiplos placeholders:
-const stmt2 = db.prepare(
-    'SELECT * FROM produtos WHERE categoria = ? AND preco < ?'
-);
-const produtos = stmt2.all('Informática', 1000);  // Retorna array
-
-// GET /api/produtos - Buscar todos com Filtros, Ordenação e Paginação
+// GET /api/produtos - Buscar todos (Filtros, Ordenação, Paginação e JOIN com Categorias)
 app.get('/api/produtos', (req, res) => {
     try {
-        // Pega todos os query parameters de uma vez, com valores padrão para paginação
         const { 
-            categoria, preco_max, preco_min, 
+            categoria_id, preco_max, preco_min, 
             ordem, direcao,
-            pagina = 1, 
-            limite = 10
+            pagina = 1, limite = 10
         } = req.query;
         
-        let sql = 'SELECT * FROM produtos WHERE 1=1';
-        const params = [];
+        // 1. Separar a base do SQL para poder usar tanto na busca quanto no COUNT
+        const baseQuery = `
+            FROM produtos p
+            INNER JOIN categorias c ON p.categoria_id = c.id
+            WHERE 1=1
+        `;
         
-        // --- 1. Aplicar Filtros ---
-        if (categoria) {
-            sql += ' AND categoria = ?';
-            params.push(categoria);
+        let filtros = '';
+        const paramsFiltros = []; // Parâmetros apenas do WHERE
+        
+        // --- 2. Aplicar Filtros (usando p. para referenciar a tabela produtos) ---
+        if (categoria_id) {
+            filtros += ' AND p.categoria_id = ?';
+            paramsFiltros.push(parseInt(categoria_id));
         }
-        
         if (preco_max) {
-            sql += ' AND preco <= ?';
-            params.push(parseFloat(preco_max));
+            filtros += ' AND p.preco <= ?';
+            paramsFiltros.push(parseFloat(preco_max));
         }
-        
         if (preco_min) {
-            sql += ' AND preco >= ?';
-            params.push(parseFloat(preco_min));
+            filtros += ' AND p.preco >= ?';
+            paramsFiltros.push(parseFloat(preco_min));
         }
         
-        // --- 2. Aplicar Ordenação ---
-        const camposValidos = ['nome', 'preco', 'categoria', 'created_at'];
+        // --- 3. Contar total de registros (para a paginação) ---
+        const countSql = `SELECT COUNT(*) as total ` + baseQuery + filtros;
+        const countStmt = db.prepare(countSql);
+        const { total } = countStmt.get(...paramsFiltros);
+        
+        // --- 4. Aplicar Ordenação ---
+        let ordemSql = '';
+        const camposValidos = ['nome', 'preco', 'categoria_id', 'created_at'];
         
         if (ordem && camposValidos.includes(ordem)) {
             const dir = (direcao && direcao.toLowerCase() === 'desc') ? 'DESC' : 'ASC';
-            sql += ` ORDER BY ${ordem} ${dir}`;
+            // Usa p.ordem para garantir que vai ordenar usando a tabela de produtos
+            ordemSql += ` ORDER BY p.${ordem} ${dir}`; 
+        } else {
+            // Ordenação padrão se não mandarem nada
+            ordemSql += ` ORDER BY p.nome ASC`;
         }
         
-        // --- 3. Contar total de registros (ANTES do LIMIT/OFFSET) ---
-        // Aqui trocamos o "SELECT *" para descobrir quantos itens existem no total com esses filtros
-        let countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total');
-        const countStmt = db.prepare(countSql);
-        const { total } = countStmt.get(...params);
-        
-        // --- 4. Aplicar Paginação ---
+        // --- 5. Aplicar Paginação ---
         const limiteNum = parseInt(limite);
         const paginaNum = parseInt(pagina);
         const offset = (paginaNum - 1) * limiteNum;
         
-        sql += ' LIMIT ? OFFSET ?';
-        params.push(limiteNum, offset);
+        let paginacaoSql = ' LIMIT ? OFFSET ?';
+        // Junta os parâmetros dos filtros com os da paginação
+        const paramsFinais = [...paramsFiltros, limiteNum, offset]; 
         
-        console.log("Query executada:", sql); // 👈 debug para ver no terminal
+        // --- 6. Montar o SELECT final completo e executar ---
+        const selectCampos = `
+            SELECT 
+                p.id, p.nome, p.preco, p.estoque, p.created_at,
+                c.id AS categoria_id,
+                c.nome AS categoria_nome,
+                c.descricao AS categoria_descricao
+        `;
         
-        // --- 5. Executar a busca final ---
-        const stmt = db.prepare(sql);
-        const produtos = stmt.all(...params);
+        const sqlFinal = selectCampos + baseQuery + filtros + ordemSql + paginacaoSql;
+        const execStmt = db.prepare(sqlFinal);
+        const produtosRaw = execStmt.all(...paramsFinais);
         
-        // --- 6. Retornar dados com os metadados ---
-        // Note que agora o JSON de resposta mudou sua estrutura!
+        // --- 7. Reformatar os dados para aninhar a categoria ---
+        const produtosFormatados = produtosRaw.map(p => ({
+            id: p.id,
+            nome: p.nome,
+            preco: p.preco,
+            estoque: p.estoque,
+            categoria: {
+                id: p.categoria_id,
+                nome: p.categoria_nome,
+                descricao: p.categoria_descricao
+            },
+            created_at: p.created_at
+        }));
+        
+        // --- 8. Retornar resposta JSON ---
         res.json({
-            dados: produtos,
+            dados: produtosFormatados,
             paginacao: {
                 pagina_atual: paginaNum,
                 itens_por_pagina: limiteNum,
@@ -96,24 +117,12 @@ app.get('/api/produtos', (req, res) => {
 // GET /api/produtos/:id - Buscar por ID
 app.get('/api/produtos/:id', (req, res) => {
     try {
-        // 1. Pegar ID da URL
         const id = parseInt(req.params.id);
+        const queryStmt = db.prepare('SELECT * FROM produtos WHERE id = ?');
+        const produtoEncontrado = queryStmt.get(id);
         
-        // 2. Preparar query com WHERE
-        const stmt = db.prepare('SELECT * FROM produtos WHERE id = ?');
-        
-        // 3. Executar (retorna 1 objeto ou undefined)
-        const produto = stmt.get(id);
-        
-        // 4. Verificar se encontrou
-        if (!produto) {
-            return res.status(404).json({ 
-                erro: 'Produto não encontrado' 
-            });
-        }
-        
-        // 5. Retornar produto
-        res.json(produto);
+        if (!produtoEncontrado) return res.status(404).json({ erro: 'Produto não encontrado' });
+        res.json(produtoEncontrado);
     } catch (error) {
         console.error(error);
         res.status(500).json({ erro: 'Erro ao buscar produto' });
@@ -123,40 +132,22 @@ app.get('/api/produtos/:id', (req, res) => {
 // POST /api/produtos - Criar produto
 app.post('/api/produtos', (req, res) => {
     try {
-        // 1. Pegar dados do body
-        const { nome, preco, categoria, estoque = 0 } = req.body;
+        const { nome, preco, categoria_id, estoque = 0 } = req.body;
         
-        // 2. Validações (igual antes!)
-        if (!nome || !preco || !categoria) {
-            return res.status(400).json({ 
-                erro: 'Campos obrigatórios faltando' 
-            });
+        if (!nome || !preco || !categoria_id) {
+            return res.status(400).json({ erro: 'Campos obrigatórios faltando' });
         }
-        
         if (typeof preco !== 'number' || preco <= 0) {
-            return res.status(400).json({ 
-                erro: 'Preço inválido' 
-            });
+            return res.status(400).json({ erro: 'Preço inválido' });
         }
         
-        // 3. Preparar INSERT
-        const stmt = db.prepare(`
-            INSERT INTO produtos (nome, preco, categoria, estoque)
+        const insertStmt = db.prepare(`
+            INSERT INTO produtos (nome, preco, categoria_id, estoque)
             VALUES (?, ?, ?, ?)
         `);
+        const result = insertStmt.run(nome, preco, categoria_id, estoque);
         
-        // 4. Executar INSERT
-        const result = stmt.run(nome, preco, categoria, estoque);
-        
-        // 5. Pegar ID gerado
-        const id = result.lastInsertRowid;
-        
-        // 6. Buscar produto criado (para retornar completo)
-        const produtoCriado = db.prepare(
-            'SELECT * FROM produtos WHERE id = ?'
-        ).get(id);
-        
-        // 7. Retornar 201 Created
+        const produtoCriado = db.prepare('SELECT * FROM produtos WHERE id = ?').get(result.lastInsertRowid);
         res.status(201).json(produtoCriado);
     } catch (error) {
         console.error(error);
@@ -167,27 +158,13 @@ app.post('/api/produtos', (req, res) => {
 // DELETE /api/produtos/:id - Deletar produto
 app.delete('/api/produtos/:id', (req, res) => {
     try {
-        // 1. Pegar ID da URL
         const id = parseInt(req.params.id);
+        const produtoExiste = db.prepare('SELECT * FROM produtos WHERE id = ?').get(id);
         
-        // 2. Verificar se produto existe
-        const produtoExiste = db.prepare(
-            'SELECT * FROM produtos WHERE id = ?'
-        ).get(id);
+        if (!produtoExiste) return res.status(404).json({ erro: 'Produto não encontrado' });
         
-        if (!produtoExiste) {
-            return res.status(404).json({ 
-                erro: 'Produto não encontrado' 
-            });
-        }
-        
-        // 3. Executar DELETE
-        const stmt = db.prepare('DELETE FROM produtos WHERE id = ?');
-        stmt.run(id);
-        
-        // 4. Retornar 204 No Content
+        db.prepare('DELETE FROM produtos WHERE id = ?').run(id);
         return res.status(200).json({ mensagem: "Produto apagado com sucesso!"});
-
     } catch (error) {
         console.error(error);
         res.status(500).json({ erro: 'Erro ao deletar' });
@@ -197,51 +174,24 @@ app.delete('/api/produtos/:id', (req, res) => {
 // PUT /api/produtos/:id - Atualizar produto
 app.put('/api/produtos/:id', (req, res) => {
     try {
-        // 1. Pegar ID da URL
         const id = parseInt(req.params.id);
+        const produtoExiste = db.prepare('SELECT * FROM produtos WHERE id = ?').get(id);
         
-        // 2. Verificar se produto existe
-        const produtoExiste = db.prepare(
-            'SELECT * FROM produtos WHERE id = ?'
-        ).get(id);
+        if (!produtoExiste) return res.status(404).json({ erro: 'Produto não encontrado' });
         
-        if (!produtoExiste) {
-            return res.status(404).json({ 
-                erro: 'Produto não encontrado' 
-            });
-        }
+        const { nome, preco, categoria_id, estoque } = req.body;
         
-        // 3. Pegar dados do body
-        const { nome, preco, categoria, estoque } = req.body;
+        if (!nome || !preco || !categoria_id) return res.status(400).json({ erro: 'Campos obrigatórios faltando' });
+        if (typeof preco !== 'number' || preco <= 0) return res.status(400).json({ erro: 'Preço inválido' });
         
-        // 4. Validações (mesmas do POST!)
-        if (!nome || !preco || !categoria) {
-            return res.status(400).json({ 
-                erro: 'Campos obrigatórios faltando' 
-            });
-        }
-        
-        if (typeof preco !== 'number' || preco <= 0) {
-            return res.status(400).json({ 
-                erro: 'Preço inválido' 
-            });
-        }
-        
-        // 5. Executar UPDATE
-        const stmt = db.prepare(`
+        const updateStmt = db.prepare(`
             UPDATE produtos 
-            SET nome = ?, preco = ?, categoria = ?, estoque = ?
+            SET nome = ?, preco = ?, categoria_id = ?, estoque = ?
             WHERE id = ?
         `);
+        updateStmt.run(nome, preco, categoria_id, estoque || 0, id);
         
-        stmt.run(nome, preco, categoria, estoque || 0, id);
-        
-        // 6. Buscar produto atualizado
-        const produtoAtualizado = db.prepare(
-            'SELECT * FROM produtos WHERE id = ?'
-        ).get(id);
-        
-        // 7. Retornar 200 OK
+        const produtoAtualizado = db.prepare('SELECT * FROM produtos WHERE id = ?').get(id);
         res.json(produtoAtualizado);
     } catch (error) {
         console.error(error);
@@ -249,28 +199,78 @@ app.put('/api/produtos/:id', (req, res) => {
     }
 });
 
-// 3. Definir porta
+// GET /api/categorias - Listar todas
+app.get('/api/categorias', (req, res) => {
+    const categorias = db.prepare('SELECT * FROM categorias').all();
+    res.json(categorias);
+});
+
+// GET /api/categorias/:id - Buscar por ID (com produtos!)
+app.get('/api/categorias/:id', (req, res) => {
+    const id = parseInt(req.params.id);
+    
+    // Buscar categoria
+    const categoria = db.prepare(
+        'SELECT * FROM categorias WHERE id = ?'
+    ).get(id);
+    
+    if (!categoria) {
+        return res.status(404).json({ erro: 'Categoria não encontrada' });
+    }
+    
+    // Buscar produtos desta categoria
+    const produtos = db.prepare(
+        'SELECT * FROM produtos WHERE categoria_id = ?'
+    ).all(id);
+    
+    // Retornar categoria + produtos
+    res.json({
+        ...categoria,
+        produtos: produtos
+    });
+});
+
+// POST /api/categorias - Criar categoria
+app.post('/api/categorias', (req, res) => {
+    const { nome, descricao } = req.body;
+    
+    if (!nome) {
+        return res.status(400).json({ erro: 'Nome obrigatório' });
+    }
+    
+    const result = db.prepare(
+        'INSERT INTO categorias (nome, descricao) VALUES (?, ?)'
+    ).run(nome, descricao);
+    
+    const categoria = db.prepare(
+        'SELECT * FROM categorias WHERE id = ?'
+    ).get(result.lastInsertRowid);
+    
+    res.status(201).json(categoria);
+});
+
+// DELETE /api/categorias/:id - Com validação!
+app.delete('/api/categorias/:id', (req, res) => {
+    const id = parseInt(req.params.id);
+    
+    // Verificar se tem produtos
+    const temProdutos = db.prepare(
+        'SELECT COUNT(*) as total FROM produtos WHERE categoria_id = ?'
+    ).get(id);
+    
+    if (temProdutos.total > 0) {
+        return res.status(400).json({ 
+            erro: `Não pode deletar. Categoria tem ${temProdutos.total} produtos`
+        });
+    }
+    
+    db.prepare('DELETE FROM categorias WHERE id = ?').run(id);
+    res.status(204).send();
+});
+
+app.get('/', (req, res) => res.json({ mensagem: '🎉 API funcionando com sucesso!' }));
+
 const PORT = 3000;
-
-// 5. Criar primeiro endpoint
-app.get('/', (req, res) => {
-    res.json({
-        mensagem: '🎉 API funcionando com sucesso!',
-        status: 'sucesso',
-        timestamp: new Date().toISOString()
-    });
-});
-
-// 6. Endpoint de informações
-app.get('/info', (req, res) => {
-    res.json({
-        nome: 'Minha API REST',
-        versao: '1.0.0',
-        autor: 'João Szczypior'
-    });
-});
-
-// 7. Iniciar servidor
 app.listen(PORT, () => {
     console.log(`🚀 Servidor rodando em http://localhost:${PORT}`);
 });
