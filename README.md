@@ -2,7 +2,8 @@
 Projeto desenvolvido para estudo do uso de API's com banco de Dados.
 
 ## 🚀 Como Fazer requisições na API:
-O deploy da API foi feito no Render, então para testa-la abra o software de teste de sua preferência ( Postman/Insomnia ) e a API estará rodando na **URL:**  https://minha-api-rest-t03u.onrender.com/
+
+O deploy da API foi feito no Render, então para testa-la abra o software de teste de sua preferência ( Postman/Insomnia ) e a API estará rodando na URL: `https://minha-api-rest-t03u.onrender.com/`
 ---
 
 ## 📡 Endpoints e Testes No Postman
