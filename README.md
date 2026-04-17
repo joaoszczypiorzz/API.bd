@@ -1,14 +1,8 @@
 # Projeto API usando Banco de Dados
 Projeto desenvolvido para estudo do uso de API's com banco de Dados.
 
-## 🚀 Como rodar o Projeto:
-
-1. Clone o Repositório
-2. Instale as dependências: `npm install`
-3. Configure o ambiente: Crie um arquivo `.env` na raiz do projeto (use o `.env.example` como base) e defina o seu `JWT_SECRET`.
-4. Inicie o servidor: `npm run dev` (Para rodar em modo desenv) ou `npm start` (Para rodar em Produção)
-5. O servidor estará rodando em: http://localhost:3000
-
+## 🚀 Como Fazer requisições na API:
+O deploy da API foi feito no Render, então para testa-la abra o software de teste de sua preferência ( Postman/Insomnia ) e a API estará rodando na **URL:**  https://minha-api-rest-t03u.onrender.com/
 ---
 
 ## 📡 Endpoints e Testes No Postman
